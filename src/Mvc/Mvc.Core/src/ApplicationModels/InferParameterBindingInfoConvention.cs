@@ -1,6 +1,7 @@
 // Licensed to the .NET Foundation under one or more agreements.
 // The .NET Foundation licenses this file to you under the MIT license.
 
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using Microsoft.AspNetCore.Mvc.ModelBinding;
@@ -27,6 +28,7 @@ public class InferParameterBindingInfoConvention : IActionModelConvention
 {
     private readonly IModelMetadataProvider _modelMetadataProvider;
     private readonly IServiceProviderIsService? _serviceProviderIsService;
+    private readonly IServiceProviderIsKeyedService? _serviceProviderIsKeyedService;
 
     /// <summary>
     /// Initializes a new instance of <see cref="InferParameterBindingInfoConvention"/>.
@@ -49,6 +51,20 @@ public class InferParameterBindingInfoConvention : IActionModelConvention
         : this(modelMetadataProvider)
     {
         _serviceProviderIsService = serviceProviderIsService ?? throw new ArgumentNullException(nameof(serviceProviderIsService));
+    }
+
+    /// <summary>
+    /// Initializes a new instance of <see cref="InferParameterBindingInfoConvention"/>.
+    /// </summary>
+    /// <param name="modelMetadataProvider">The model metadata provider.</param>
+    /// <param name="serviceProviderIsKeyedService">The provider to use to get keyed services</param>
+    public InferParameterBindingInfoConvention(
+        IModelMetadataProvider modelMetadataProvider,
+        IServiceProviderIsKeyedService serviceProviderIsKeyedService)
+        : this(modelMetadataProvider)
+    {
+        _serviceProviderIsKeyedService = serviceProviderIsKeyedService ?? throw new ArgumentNullException(nameof(serviceProviderIsKeyedService));
+        _serviceProviderIsService = serviceProviderIsKeyedService;
     }
 
     internal bool IsInferForServiceParametersEnabled => _serviceProviderIsService != null;
@@ -115,9 +131,10 @@ public class InferParameterBindingInfoConvention : IActionModelConvention
     {
         if (IsComplexTypeParameter(parameter, out var metadata))
         {
-            if (IsService(parameter.ParameterType))
+            var fromKeyedAttribute = (FromKeyedServicesAttribute?)parameter.Attributes.FirstOrDefault(attr => attr is FromKeyedServicesAttribute);
+            if (IsService(parameter.ParameterType, fromKeyedAttribute?.Key))
             {
-                return BindingSource.Services;
+                return fromKeyedAttribute != null ? BindingSource.KeyedServices : BindingSource.Services;
             }
 
             return metadata.BoundProperties.Any(prop => prop.BindingSource is not null) ? null : BindingSource.Body;
@@ -131,9 +148,14 @@ public class InferParameterBindingInfoConvention : IActionModelConvention
         return BindingSource.Query;
     }
 
-    private bool IsService(Type type)
+    private bool IsService(Type type, object? key)
     {
         if (_serviceProviderIsService == null)
+        {
+            return false;
+        }
+
+        if (key != null && _serviceProviderIsKeyedService == null)
         {
             return false;
         }
@@ -147,7 +169,15 @@ public class InferParameterBindingInfoConvention : IActionModelConvention
             type = type.GenericTypeArguments[0];
         }
 
-        return _serviceProviderIsService.IsService(type);
+        if (key == null)
+        {
+            return _serviceProviderIsService.IsService(type);
+        }
+
+        // We checked before that _serviceProviderIsKeyedService was not null
+        Debug.Assert(_serviceProviderIsKeyedService != null);
+        return _serviceProviderIsKeyedService.IsKeyedService(type, key);
+
     }
 
     private static bool ParameterExistsInAnyRoute(ActionModel action, string parameterName)
